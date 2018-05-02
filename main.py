@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import subprocess
+
 import requests
 import re
 import json
@@ -27,7 +29,6 @@ HEADERS = {
                   'Chrome/65.0.3325.181 Safari/537.36'
 }
 
-
 if __name__ == '__main__':
     s = requests.session()
     s.mount('http://', requests.adapters.HTTPAdapter(max_retries=3))
@@ -35,7 +36,6 @@ if __name__ == '__main__':
     s.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                                     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3325.181 Safari/537.36'})
     resp = s.get('http://www.onsen.ag/')
-    # print resp.content
     playlist = {}
     if not os.path.exists('data'):
         os.mkdir('data')
@@ -43,6 +43,7 @@ if __name__ == '__main__':
         with open(os.path.join('data', 'list.json'), 'r') as f:
             playlist = json.load(f)
     m = REG['ul'].match(resp.content)
+    # Fetch
     if m is not None:
         ul = m.group(1)
         it = REG['li'].finditer(ul)
@@ -62,32 +63,34 @@ if __name__ == '__main__':
                     u'uploaded': u'False'
                 }
                 if u'noMovie' in item[u'class']:
-                    print 'Skip ' + bid + ' - ' + item[u'title'] + ': Bangumi is unavailable'
+                    print u'Skip ' + bid + u' - ' + item[u'title'] + u': Bangumi is unavailable'
                     continue
-                api = 'http://www.onsen.ag/data/api/getMovieInfo/' + bid
+                api = u'http://www.onsen.ag/data/api/getMovieInfo/' + bid
                 resp = s.get(api)
                 movieInfo = json.loads(resp.content[9: -3])
                 item[u'remoteFile'] = movieInfo['moviePath']['pc']
-                item[u'thumbnail'] = movieInfo['thumbnailPath'].replace('_m.', '_l.')
+                item[u'remoteThumbnail'] = u'http://www.onsen.ag' + movieInfo['thumbnailPath'].replace('_m.', '_l.')
                 filename = item[u'remoteFile'].split('/')[-1]
                 fid = filename.split('.')[0]
                 item[u'localFile'] = os.path.join('data', bid, filename).decode('utf-8')
+                item[u'localThumbnail'] = os.path.join('data', bid, item[u'remoteThumbnail'].split('/')[-1])
+                item[u'type'] = item[u'localFile'].split(u'.')[-1]
                 if bid in playlist and fid in playlist[bid]:
-                    print 'Skip ' + item[u'localFile'] + ': File exists in list file'
+                    print u'Skip ' + item[u'localFile'] + u': File exists in list file'
                     continue
                 if not os.path.exists(os.path.join('data', bid)):
                     os.mkdir(os.path.join('data', bid))
-                    print 'Writing to data\\' + bid + '\\' + item[u'thumbnail'].split('/')[-1] + '...'
-                    with open(os.path.join('data', bid, item[u'thumbnail'].split('/')[-1]), 'wb') as f:
-                        url = 'http://www.onsen.ag' + item[u'thumbnail']
-                        resp = s.get('http://www.onsen.ag' + item[u'thumbnail'], stream=True, timeout=30)
+                    print u'Writing to data\\' + bid + u'\\' + item[u'remoteThumbnail'].split('/')[-1] + u'...'
+                    with open(item[u'localThumbnail'], 'wb') as f:
+                        url = u'http://www.onsen.ag' + item[u'remoteThumbnail']
+                        resp = s.get(item[u'remoteThumbnail'], stream=True, timeout=30)
                         for chunk in tqdm(resp.iter_content()):
                             f.write(chunk)
-                print 'Writing to ' + item[u'localFile'] + '...'
+                print u'Writing to ' + item[u'localFile'] + u'...'
                 with open(item[u'localFile'], 'wb') as f:
                     resp = s.get(item[u'remoteFile'], stream=True, timeout=30)
                     resp.raise_for_status()
-                    print len(resp.content)
+                    print 'File size: ' + str(len(resp.content))
                     for chunk in tqdm(resp.iter_content()):
                         f.write(chunk)
                 if bid in playlist and fid not in playlist[bid]:
@@ -96,3 +99,46 @@ if __name__ == '__main__':
                     playlist[bid] = {fid: item}
                 with open(os.path.join('data', 'list.json'), 'w') as f:
                     json.dump(playlist, f, ensure_ascii=False)
+    # Convert
+    for bid in playlist:
+        for fid in playlist[bid]:
+            item = playlist[bid][fid]
+            if u'convertedFile' in item:
+                continue
+            if u'type' not in item:
+                item[u'type'] = item[u'localFile'].split(u'.')[-1]
+            if item[u'type'] == u'mp3':
+                f = eyed3.load(item[u'localFile'])
+                time = f.info.time_secs
+                print item[u'localFile'] + ': ' + str(time) + 's'
+                pass
+                item[u'convertedFile'] = item[u'localFile'].split(u'.')[0] + u'.mp4'
+                ff = ffmpy.FFmpeg(
+                    global_options='-y',
+                    inputs={
+                        item[u'localFile']: '-thread_queue_size 96',
+                        item[u'localThumbnail']: '-loop 1 -t ' + str(time) + ' -r 10 -f image2'
+                    },
+                    outputs={
+                        item[u'convertedFile']: '-c:v libx264 -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -crf 10 '
+                                                '-r 10 -pix_fmt yuv420p'
+                    }
+                )
+                print ff.cmd
+                # Run
+                ff.run()
+            elif item[u'type'] == u'mp4':
+                item[u'convertedFile'] = item[u'localFile']
+            else:
+                print u'Un recognized file type: ' + item[u'localFile']
+                continue
+            with open(os.path.join('data', 'list.json'), 'w') as f:
+                json.dump(playlist, f, ensure_ascii=False)
+    # Upload
+    for bid in playlist:
+        for fid in playlist[bid]:
+            item = playlist[bid][fid]
+            if u'uploaded' not in item:
+                item[u'uploaded'] = u'False'
+            if item[u'uploaded'] == u'False':
+                pass
